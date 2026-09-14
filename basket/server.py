@@ -18,6 +18,7 @@ from .events import analyze_frames, summary
 from .measure import measurements
 from .tracking import BallTracker
 from .video import probe
+from .prediction import video_predictions
 from .pipeline import process_session
 from .render import render_video
 
@@ -130,6 +131,16 @@ def analyze(session_id: str, config: AnalysisConfig):
     if session_id == "demo":
         raise HTTPException(400, "デモ動画を実動画解析には使用しません。練習動画を読み込んでください")
     return launch(session_id, lambda progress: process_session(folder, config, MODEL_DIR, progress))
+
+
+@app.get("/api/sessions/{session_id}/predictions")
+def get_predictions(session_id: str):
+    folder = directory(session_id)
+    with lock:
+        session = load_json(folder/"session.json")
+        if not session.get("config") or not (folder/"frames.json").exists():
+            raise HTTPException(409, "まだ解析されていません")
+        return video_predictions(load_json(folder/"frames.json"), session)
 
 
 @app.post("/api/sessions/{session_id}/recompute")

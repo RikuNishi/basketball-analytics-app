@@ -2,9 +2,10 @@ from collections import deque
 import cv2
 from .measure import EDGES, valid
 from .video import read_frames, VideoWriter
+from .prediction import video_predictions
 
 
-def annotate(image, frame, trail, session):
+def annotate(image, frame, trail, session, prediction=None):
     h, w = image.shape[:2]
     rim = session["config"]["rim"]
     a = (int(rim["x"]*w), int(rim["y"]*h))
@@ -28,6 +29,11 @@ def annotate(image, frame, trail, session):
     for p, q in zip(trail, list(trail)[1:]):
         if q[0]-p[0] <= session["config"]["max_gap_s"] and p[2] == q[2] == "detected":
             cv2.line(image, p[1], q[1], (68, 162, 250), 2, cv2.LINE_AA)
+    if prediction:
+        for i, (p, q) in enumerate(zip(prediction, prediction[1:])):
+            if i % 3 != 2:
+                cv2.line(image, tuple(map(round, p)), tuple(map(round, q)), (199, 137, 7), 4, cv2.LINE_AA)
+        cv2.putText(image, "PREDICTED / 2D", (12, h-16), cv2.FONT_HERSHEY_SIMPLEX, .5, (199, 137, 7), 1, cv2.LINE_AA)
     active = next((s for s in session["shots"] if not s.get("deleted") and s["start_s"] <= frame["t"] <= s["end_s"]), None)
     label = f"SHOT {active['id']:02d} | {active['outcome'].upper()}" if active else "BASKET LAB | 2D MEASUREMENTS"
     cv2.rectangle(image, (12, 12), (min(w-12, 550), 75), (30, 40, 35), -1)
@@ -40,6 +46,7 @@ def annotate(image, frame, trail, session):
 def render_video(source, output, frames, session, progress=None, preview=None):
     meta = session["video"]
     trail = deque()
+    predictions = video_predictions(frames, session)
     # H.264 YUV420 requires even dimensions. Crop at most one border pixel.
     width, height = meta["width"]//2*2, meta["height"]//2*2
     plain = VideoWriter(preview, width, height, meta["fps"]) if preview else None
@@ -51,7 +58,7 @@ def render_video(source, output, frames, session, progress=None, preview=None):
                 image = image[:height, :width]
                 if plain:
                     plain.write(image, stamp["t"])
-                writer.write(annotate(image.copy(), frames[i], trail, session), stamp["t"])
+                writer.write(annotate(image.copy(), frames[i], trail, session, predictions.get(frames[i]['index'])), stamp["t"])
                 if progress and i % 30 == 0:
                     progress(i/max(1, len(frames)))
     finally:
