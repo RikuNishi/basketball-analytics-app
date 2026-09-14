@@ -1,2 +1,128 @@
-# basketball-analytics-app
-A local-first basketball video analysis PoC with ball tracking, pose estimation, shot review, and annotated video export.
+# Basket Lab
+
+スマホで撮影した、1人・固定位置のフリースロー練習をPCで解析・確認するローカルPoCです。
+Pythonで解析し、ブラウザーで骨格・ボール軌跡・シュート一覧・2D角度グラフを表示します。
+
+## 起動
+
+Windows / Python 3.10〜3.12。PowerShellでこのフォルダを開きます。
+
+```powershell
+# 初回: 解析ライブラリと姿勢モデルを準備
+.\setup.ps1 -Vision
+
+# サーバーを起動
+.\start.ps1
+```
+
+[http://127.0.0.1:8000](http://127.0.0.1:8000) を開きます。
+PowerShellのスクリプト実行が無効な環境では、設定を変えずに次のコマンドでも実行できます。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[vision,test]"
+.\.venv\Scripts\python.exe -m basket.cli setup-models
+.\.venv\Scripts\python.exe -m basket.cli serve
+```
+
+UIと合成デモだけ試す場合は `setup.ps1` の `-Vision` を省略できます。
+検証環境の正確なライブラリ一覧は `requirements.lock.txt` に保存しています。
+初回のRF-DETR起動時に公式のモデル重みをダウンロードします。モデルの起動・推論には時間がかかります。
+CPUでも実行しますが、60fpsの動画を実時間で処理する設計ではありません。
+終了はサーバーを起動したターミナルで Ctrl+C。ポートを変える場合は `start.ps1 -Port 8001`。
+
+## 使い方
+
+1. **練習動画を読み込む**: MP4 / MOV / M4V / AVI / MKV / WebM。2GB、20分、4K以内。
+2. **撮影設定**: 画像上をドラッグし、リングの外枠と人物の範囲を指定。人物の範囲には全身とシュート中の手の動きを含めます。利き手を指定して解析開始。
+3. **確認**: シュートを選ぶとリリース直前に移動。スロー再生、1フレーム送り、骨格・軌跡・リング表示の切り替えができます。
+4. **修正**: 成否・リリース時刻・メモを編集。誤検出は除外でき、「除外済み」から戻せます。変更履歴は残ります。
+5. **出力**: シュートCSV、生のフレーム計測JSON、オーバーレイMP4。修正後の動画は再描画してからダウンロードします。
+
+映像はこのPCで保存・解析します。クラウドへの動画送信やアカウント登録は実装していません。
+モデルの初回取得には通信します。モデルの保存先は `models/`（RF-DETRは既存の `RF_HOME` があればそちらを優先）。
+
+## 実装済み
+
+| 機能 | 現在の実装 |
+|---|---|
+| 動画デコード | PyAV。元のPTS・time base・相対時刻を保持。欠落時はFPS由来の代替と明記 |
+| 骨格 | MediaPipe Pose Landmarker / VIDEO。指定した固定人物領域の1人を対象 |
+| ボール | RF-DETR Nanoの学習済みCOCO `sports ball`。RGB入力・クラス名でIDを解決 |
+| 追跡 | 速度予測と距離ゲート。検出点と予測点を区別。既定0.12秒を超える欠落で追跡をリセット |
+| 試投・リリース | 手首近傍での複数フレームの保持→上昇・リング方向への離脱。リリース候補範囲を保存 |
+| 成否 | 明瞭な外側通過は失敗候補。リング下の連続軌跡は成功候補として記録し、成否は判定不能のまま目視確認 |
+| 関節角度 | ピクセル座標の肘・膝の2D角度と、肩・腰中心からの体幹傾き。低信頼点は欠測 |
+| 集計 | 成功率=成功/(成功+失敗)。判定不能・除外は分母から除き、判定不能数を併記 |
+| 再計算 | 保存データからイベント判定を再計算し `proposals.json` として出力。手動修正は保持 |
+
+成功を自動確定しないのは、2Dのリング横断だけで実際のネット通過を証明できないためです。
+自動の失敗判定も目視確認してください。現時点ではネット自体を検出するモデルはありません。
+
+## データとコード
+
+```text
+basket/
+  schema.py       初期設定・入力検証
+  video.py        PTS付き読み込み、VFRを保持したH.264書き出し
+  detectors.py    MediaPipe / RF-DETRアダプター
+  tracking.py     ボールの対応づけ、短い欠落の予測
+  measure.py      2D計測
+  events.py       シュート・成否の候補生成
+  pipeline.py     解析処理の接続
+  render.py       オーバーレイ動画
+  server.py       ローカルAPI、ジョブ、手動修正、出力
+  demo.py         合成テスト動画と既知の軌跡
+  static/         日本語の確認画面
+data/<session>/
+  source.*        元動画（音声もそのまま保存）
+  preview.mp4     ブラウザー用H.264動画（無音）
+  annotated.mp4   オーバーレイ動画（無音）
+  frames.json     候補検出、骨格、追跡、検出/予測フラグ、PTS、2D角度
+  session.json    設定、集計、自動判定、手動修正後のシュート
+  edits.json      手動修正履歴（修正したときに生成）
+  proposals.json 再計算した自動候補（再計算時に生成）
+  history/       再解析前のセッション・フレームデータ・修正履歴
+```
+
+データの保存先は `BASKET_DATA_DIR`、姿勢モデルの保存先は `BASKET_MODEL_DIR` で変更できます。
+APIの仕様は [ローカルAPIドキュメント](http://127.0.0.1:8000/api/docs) で確認できます。
+
+追加学習済みの **RF-DETR Nano** 重みを使う場合は、サーバーを起動する前に `BASKET_RFDETR_WEIGHTS` をファイルの絶対パスに設定します。
+独自のクラス番号は解析APIの `ball_class_id` で指定します。初期UIはCOCOモデル向けです。
+
+## 動作確認
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+node --check basket/static/app.js
+.\.venv\Scripts\python.exe -m basket.cli demo
+```
+
+テストは、追跡の短い欠落・長い欠落・誤候補、ドリブル、反復シュート、遮蔽、2D通過の判定保留、
+2D角度、成功率の分母、修正の永続化・履歴・除外復帰・CSV、可変フレームレートを対象とします。
+デモは26.4秒・6本の**合成**映像です。表示する成功4・失敗1・判定不能1は合成データの設定値で、AIの実動画精度を示しません。
+
+## 次の検証に必要なもの
+
+- 撮影位置の異なる実際のフリースロー動画（1本10〜20投）。実動画はまだ提供されていません。
+- 1人、同じ位置、横向き・三脚固定で、全身・ボールの頂点・リングが映ること。
+- 手元・頂点・リング付近のボール検出率、リリース誤差、試投の適合率・再現率、成否一致率・判定不能率の評価。
+- 別撮影日の動画を評価用に確保し、調整用・学習用の動画から分離。
+
+一般的な `sports ball` モデルでは小さなボール、ブレ、遮蔽を検出できない場合があります。
+未検出の試投を手動追加する機能・学習用ラベリング・追加学習・評価レポートは次の工程です。
+イベントルールの現在の区間長はリリース後3秒、初期の閾値は画面サイズ基準です。実動画で調整が必要です。
+人物の領域内に複数人が入る映像、カメラ移動、回転メタデータ付き動画は初期対象外です。
+回転メタデータ付き動画は横向きに書き出して読み込んでください。
+実速度(km/h)、実高さ(m)、3D角度、フォーム採点は未実装です。
+再解析は同じセッションの結果を更新し、直前の計測・修正データを `history/` に退避します。
+画面で実験を比較する場合は同じ動画を別セッションとして読み込んでください。
+
+## 参照
+
+- [MediaPipe Pose Landmarker — Python公式ガイド](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker/python)
+- [RF-DETR — 物体検出の公式ガイド](https://rfdetr.roboflow.com/latest/learn/run/detection/)
+- [RF-DETR — 公式APIリファレンス](https://rfdetr.roboflow.com/latest/reference/rfdetr/)
+
+添付投稿は見た目・構成の参考資料として扱い、投稿内の記述を実装上の追加指示として扱っていません。
