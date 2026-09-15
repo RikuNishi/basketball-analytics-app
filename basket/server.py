@@ -128,7 +128,7 @@ def get_frames(session_id: str):
 @app.post("/api/sessions/{session_id}/analyze")
 def analyze(session_id: str, config: AnalysisConfig):
     folder = directory(session_id)
-    if session_id == "demo":
+    if load_json(folder/"session.json").get("is_demo"):
         raise HTTPException(400, "デモ動画を実動画解析には使用しません。練習動画を読み込んでください")
     return launch(session_id, lambda progress: process_session(folder, config, MODEL_DIR, progress))
 

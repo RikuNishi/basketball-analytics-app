@@ -3,5 +3,14 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 data/
-models/
+models/*
+!models/README.md
 *.log
+basket/static/samples/
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.webm
+*.gif

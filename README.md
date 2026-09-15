@@ -1,22 +1,93 @@
 # Basket Lab
 
-スマホで撮影した、1人・固定位置のフリースロー練習をPCで解析・確認するローカルPoCです。
-Pythonで解析し、ブラウザーで骨格・ボール軌跡・シュート一覧・2D角度グラフを表示します。
+Basket Lab is a local proof of concept for analyzing and reviewing fixed-camera, single-player free-throw practice recorded on a smartphone. Python performs the analysis, while the browser interface displays pose landmarks, the ball trajectory, shot attempts, and 2D joint-angle charts.
 
-## 起動
+## Technical overview
 
-Windows / Python 3.10〜3.12。PowerShellでこのフォルダを開きます。
+Basket Lab analyzes fixed-camera footage of a single basketball player locally in Python and provides a mobile-friendly browser interface for reviewing results. The current default session uses the real clip at `data/demo/single_three_point.mov`. The initial target is free-throw practice; this particular sample shows a three-point shot.
+
+### Models and responsibilities
+
+| Model / library | Purpose | Input and output | Application configuration |
+|---|---|---|---|
+| **RF-DETR Nano** (`rfdetr==1.10.1`) | Per-frame ball detection | RGB image -> bounding boxes, classes, and confidence scores. Each box is converted to a center point and approximate radius | COCO-pretrained `rf-detr-nano.pth`, filtered to the `sports ball` class. No basketball-specific fine-tuning has been performed |
+| **MediaPipe Pose Landmarker Lite** (`mediapipe==0.10.35`) | Body pose estimation | Image cropped to the manually selected player region -> 33 body landmarks, mapped back to full-frame pixel coordinates | `pose_landmarker_lite.task`, `VIDEO` mode, `num_poses=1`. Landmark confidence is the minimum of visibility and presence |
+
+RF-DETR locates the **ball**, while MediaPipe estimates **body landmarks**. Python rules operating on their time series determine shot attempts, release times, and proposed outcomes. The application does not use a trained outcome classifier, a form-scoring model, or an LLM. Player and rim regions are selected manually; automatic rim and net detection are not implemented.
+
+Implementation: [detectors.py](basket/detectors.py). See [models/README.md](models/README.md) for model storage and custom-weight configuration.
+
+### Analysis pipeline
+
+```text
+Video file (MP4 / MOV / other supported formats)
+  -> PyAV decodes frames and source timestamps
+  |-- RF-DETR Nano -> ball detections
+  |-- MediaPipe Pose Landmarker Lite -> body landmarks
+  -> Ball tracking and 2D angle measurements
+  -> Shot intervals, release times, and outcome proposals
+  -> Frame measurements and shot records saved as JSON
+  |-- Short-horizon forecasts from observations available at each timestamp
+  |-- Browser playback with pose, observed tracks, and forecast overlays
+  |-- Annotated MP4 output through OpenCV / PyAV
+```
+
+| Stage | Current method | Implementation |
+|---|---|---|
+| Video and timing | Preserve PTS, time base, and relative timestamps. Mark FPS-derived fallback timestamps separately | [video.py](basket/video.py) |
+| Ball tracking | Predict the next position from previous position and velocity, then associate nearby detections. Reset after gaps exceeding 0.12 seconds by default | [tracking.py](basket/tracking.py) |
+| Attempts and release | Confirm possession near the shooting wrist across multiple frames, followed by upward separation toward the rim. Retain a release-time candidate interval | [events.py](basket/events.py) |
+| Outcomes | Inspect observed descending tracks near the rim. Clear outside passages are automatically classified as misses. Continuous tracks below the rim become make candidates, with the outcome left unknown for review | [events.py](basket/events.py) |
+| Body measurements | Calculate 2D elbow and knee angles from shoulder-elbow-wrist and hip-knee-ankle landmarks. Derive torso lean from shoulder and hip centers. Treat low-confidence landmarks as missing | [measure.py](basket/measure.py) |
+| Video trajectory forecasts | Fit recent observed coordinates as quadratic functions of time and draw up to 0.6 seconds ahead. Browser overlays and MP4 exports share the same prediction logic | [prediction.py](basket/prediction.py), [render.py](basket/render.py) |
+| Cross-shot trajectory comparison | Overlay local quadratic fits on observed points and align shots by their first observed position immediately after release | [trajectory.js](basket/static/trajectory.js) |
+
+### Observations, smoothed curves, and forecasts
+
+- **Observed points:** Ball positions detected by the model in individual frames. These are model measurements, not human-annotated ground truth, and may include false detections.
+- **Comparison curves:** Display-only smoothing of already observed tracks. Segments with fewer than five points receive no fitted curve. Curves do not bridge long gaps or extend beyond their observed interval.
+- **Video forecasts:** Forward estimates using only observations available by the current frame. Least-squares fits of `x(t)` and `y(t)` use at least six points spanning at least 0.15 seconds within the latest 0.45-second window. Forecasts extend up to 0.6 seconds ahead and appear as blue dashed lines.
+
+Forecasts are suppressed on frames without a detection or when the fit is unstable, and are truncated at the image boundary. Forecasting for a shot ends when its descending ball crosses the rim's image-space height. This is a 2D image-space estimate, not a calibrated 3D simulation of gravity and physical distance. Neither smoothed comparison curves nor forecast lines are used as evidence for outcome classification.
+
+### Application stack and execution
+
+| Area | Technology and behavior |
+|---|---|
+| Languages | Python 3.10-3.12, JavaScript, HTML, CSS |
+| API | FastAPI / Uvicorn, served locally at `127.0.0.1:8000` |
+| Analysis jobs | Sequential processing through a single Python worker thread |
+| Numerical computation | NumPy; PyTorch for the object detector and the MediaPipe runtime for pose estimation |
+| Video rendering | OpenCV (`opencv-contrib-python==5.0.0.93`) for drawing, PyAV / H.264 for encoding |
+| Review UI | Plain HTML / CSS / JavaScript, with Canvas overlays and charts |
+| Storage | Local files: frame JSON, session JSON, edit history, CSV, and MP4. No database |
+| Mobile support | Responsive interface, inline video playback, and bottom navigation. Native packaging, on-device inference, and app-store distribution are not implemented |
+
+Inference runs on the PC without a cloud inference API. Initial dependency installation and model retrieval require network access. Dependency constraints are defined in [pyproject.toml](pyproject.toml); versions from the validated environment are recorded in [requirements.lock.txt](requirements.lock.txt).
+
+### Current real-video sample and limitations
+
+If `data/demo/single_three_point.mov` exists, startup registers it as a real-video session. Existing analysis results are retained across restarts. If the file is absent, startup does not generate synthetic footage. Video files are excluded from Git, so place the clip at the same path on another machine or import a video through the UI. Registration alone does not run inference; start analysis from the recording setup screen.
+
+During local verification on 2026-09-15, the approximately 4.1-second, 3840 x 2160 clip decoded into 246 frames and produced one detected attempt. Pose coverage was 72.4% and ball detection coverage was 54.1%. These are **fractions of frames with available detections**, not accuracy against ground truth. The automatically proposed miss still requires visual review. One clip is insufficient to establish general accuracy.
+
+Angles and trajectories are measured in 2D image coordinates. Physical speed in km/h, height in meters, 3D joint angles, and form scoring are not implemented. Comparisons assume a fixed camera, one target player, and consistent recording conditions.
+
+## Getting started
+
+Requirements: Windows and Python 3.10–3.12. Open PowerShell in this directory, then run:
 
 ```powershell
-# 初回: 解析ライブラリと姿勢モデルを準備
+# First run: install the analysis dependencies and download the pose model
 .\setup.ps1 -Vision
 
-# サーバーを起動
+# Start the server
 .\start.ps1
 ```
 
-[http://127.0.0.1:8000](http://127.0.0.1:8000) を開きます。
-PowerShellのスクリプト実行が無効な環境では、設定を変えずに次のコマンドでも実行できます。
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). To use a different port, run `start.ps1 -Port 8001`. Stop the server with Ctrl+C in its terminal.
+
+If PowerShell script execution is disabled, use the equivalent commands below without changing the system policy:
 
 ```powershell
 python -m venv .venv
@@ -25,104 +96,104 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m basket.cli serve
 ```
 
-UIと合成デモだけ試す場合は `setup.ps1` の `-Vision` を省略できます。
-検証環境の正確なライブラリ一覧は `requirements.lock.txt` に保存しています。
-初回のRF-DETR起動時に公式のモデル重みをダウンロードします。モデルの起動・推論には時間がかかります。
-CPUでも実行しますが、60fpsの動画を実時間で処理する設計ではありません。
-終了はサーバーを起動したターミナルで Ctrl+C。ポートを変える場合は `start.ps1 -Port 8001`。
+Omit `-Vision` from `setup.ps1` if you only want to review previously analyzed sessions. Real-video analysis requires the vision dependencies. Exact package versions used by the validated environment are recorded in `requirements.lock.txt`.
 
-## 使い方
+RF-DETR downloads its official pretrained weights on the first real analysis. Model initialization and inference can take some time. CPU inference is supported, but the application is not designed to process 60 fps video in real time. See [models/README.md](models/README.md) for the model architecture, local-execution behavior, cache paths, and custom-weight configuration.
 
-1. **練習動画を読み込む**: MP4 / MOV / M4V / AVI / MKV / WebM。2GB、20分、4K以内。
-2. **撮影設定**: 画像上をドラッグし、リングの外枠と人物の範囲を指定。人物の範囲には全身とシュート中の手の動きを含めます。利き手を指定して解析開始。
-3. **確認**: シュートを選ぶとリリース直前に移動。スロー再生、1フレーム送り、骨格・軌跡・リング表示の切り替えができます。
-4. **修正**: 成否・リリース時刻・メモを編集。誤検出は除外でき、「除外済み」から戻せます。変更履歴は残ります。
-5. **出力**: シュートCSV、生のフレーム計測JSON、オーバーレイMP4。修正後の動画は再描画してからダウンロードします。
+## Usage
 
-映像はこのPCで保存・解析します。クラウドへの動画送信やアカウント登録は実装していません。
-モデルの初回取得には通信します。モデルの保存先は `models/`（RF-DETRは既存の `RF_HOME` があればそちらを優先）。
+1. **Import a practice video:** MP4, MOV, M4V, AVI, MKV, or WebM; up to 2 GB, 20 minutes, and 4K.
+2. **Configure the recording:** Drag on the image to mark the outside of the rim and the player region. Include the player's entire body and shooting-hand motion, select handedness, and start the analysis.
+3. **Review:** Select a shot to seek to just before release. Use slow playback, frame stepping, and the pose, trajectory, and rim display toggles.
+4. **Correct:** Edit the outcome, release time, and notes. False detections can be excluded and later restored. An edit history is retained.
+5. **Export:** Download shot data as CSV, raw per-frame measurements as JSON, or an annotated MP4. After corrections, the video is rendered again before download.
 
-## 実装済み
+Videos are stored and analyzed on this computer. The application does not implement cloud video uploads or account registration. Network access is needed to install dependencies and retrieve models for the first time; once those files are present, inference is local.
 
-| 機能 | 現在の実装 |
+## Implemented features
+
+| Area | Current implementation |
 |---|---|
-| 動画デコード | PyAV。元のPTS・time base・相対時刻を保持。欠落時はFPS由来の代替と明記 |
-| 骨格 | MediaPipe Pose Landmarker / VIDEO。指定した固定人物領域の1人を対象 |
-| ボール | RF-DETR Nanoの学習済みCOCO `sports ball`。RGB入力・クラス名でIDを解決 |
-| 追跡 | 速度予測と距離ゲート。検出点と予測点を区別。既定0.12秒を超える欠落で追跡をリセット |
-| 試投・リリース | 手首近傍での複数フレームの保持→上昇・リング方向への離脱。リリース候補範囲を保存 |
-| 成否 | 明瞭な外側通過は失敗候補。リング下の連続軌跡は成功候補として記録し、成否は判定不能のまま目視確認 |
-| 関節角度 | ピクセル座標の肘・膝の2D角度と、肩・腰中心からの体幹傾き。低信頼点は欠測 |
-| 集計 | 成功率=成功/(成功+失敗)。判定不能・除外は分母から除き、判定不能数を併記 |
-| 再計算 | 保存データからイベント判定を再計算し `proposals.json` として出力。手動修正は保持 |
+| Video decoding | PyAV preserves the original presentation timestamps, time base, and relative time; an FPS-derived fallback is explicitly marked when timestamps are missing |
+| Pose | MediaPipe Pose Landmarker in VIDEO mode, limited to one person in the configured fixed player region |
+| Ball detection | RF-DETR Nano pretrained on COCO; RGB input and class-name resolution for `sports ball` |
+| Tracking | Velocity prediction and distance gating; measured and predicted positions remain distinguishable; tracking resets after a gap longer than 0.12 seconds by default |
+| Attempt and release detection | Multi-frame ball possession near the wrist followed by upward motion and separation toward the rim; the release candidate interval is retained |
+| Outcome | A clear outside passage becomes a miss candidate; a continuous trajectory below the rim becomes a make candidate, while the final result remains unknown pending visual confirmation |
+| Joint angles | Pixel-space 2D elbow and knee angles plus torso lean derived from shoulder and hip centers; low-confidence points are treated as missing |
+| Summary | Make percentage is `made / (made + missed)`; unknown and excluded attempts are omitted from the denominator, and unknown attempts are reported separately |
+| Recompute | Re-runs event detection from saved measurements and exports `proposals.json` without overwriting manual corrections |
 
-成功を自動確定しないのは、2Dのリング横断だけで実際のネット通過を証明できないためです。
-自動の失敗判定も目視確認してください。現時点ではネット自体を検出するモデルはありません。
+The application does not automatically confirm made shots because a 2D rim crossing cannot prove that the ball passed through the net. Automatically proposed misses should also be reviewed. The current model does not detect the net itself.
 
-## データとコード
+## Code and data layout
 
 ```text
 basket/
-  schema.py       初期設定・入力検証
-  video.py        PTS付き読み込み、VFRを保持したH.264書き出し
-  detectors.py    MediaPipe / RF-DETRアダプター
-  tracking.py     ボールの対応づけ、短い欠落の予測
-  measure.py      2D計測
-  events.py       シュート・成否の候補生成
-  pipeline.py     解析処理の接続
-  render.py       オーバーレイ動画
-  server.py       ローカルAPI、ジョブ、手動修正、出力
-  demo.py         合成テスト動画と既知の軌跡
-  static/         日本語の確認画面
+  schema.py       Setup configuration and input validation
+  video.py        Timestamp-aware decoding and VFR-preserving H.264 output
+  detectors.py    MediaPipe and RF-DETR adapters
+  tracking.py     Ball association and short-gap prediction
+  measure.py      2D measurements
+  events.py       Shot, release, and outcome proposals
+  prediction.py   Past-observation-only short-horizon trajectory forecasts
+  pipeline.py     Analysis pipeline orchestration
+  render.py       Annotated video rendering
+  server.py       Local API, jobs, manual corrections, and exports
+  default_session.py  Registers the local real clip without synthetic results
+  demo.py         Legacy synthetic fixture generator; not used on startup
+  static/         Japanese review interface
 data/<session>/
-  source.*        元動画（音声もそのまま保存）
-  preview.mp4     ブラウザー用H.264動画（無音）
-  annotated.mp4   オーバーレイ動画（無音）
-  frames.json     候補検出、骨格、追跡、検出/予測フラグ、PTS、2D角度
-  session.json    設定、集計、自動判定、手動修正後のシュート
-  edits.json      手動修正履歴（修正したときに生成）
-  proposals.json 再計算した自動候補（再計算時に生成）
-  history/       再解析前のセッション・フレームデータ・修正履歴
+  source.*        Original video, including its audio
+  preview.mp4     Silent H.264 browser preview
+  annotated.mp4   Silent annotated video
+  frames.json     Detections, pose, tracking source flags, timestamps, and 2D angles
+  session.json    Configuration, summary, automatic proposals, and reviewed shots
+  edits.json      Manual edit history, created after the first correction
+  proposals.json  Recomputed automatic proposals, created on request
+  history/        Session, frame, and edit data archived before re-analysis
+models/
+  README.md                   Model behavior and RF-DETR technical notes
+  pose_landmarker_lite.task   Downloaded MediaPipe model; not committed
+  rfdetr/rf-detr-nano.pth     Downloaded RF-DETR weights; not committed
 ```
 
-データの保存先は `BASKET_DATA_DIR`、姿勢モデルの保存先は `BASKET_MODEL_DIR` で変更できます。
-APIの仕様は [ローカルAPIドキュメント](http://127.0.0.1:8000/api/docs) で確認できます。
+Set `BASKET_DATA_DIR` to change the data directory and `BASKET_MODEL_DIR` to change the application model directory. RF-DETR honors an existing `RF_HOME`; otherwise the application points it at `models/rfdetr`.
 
-追加学習済みの **RF-DETR Nano** 重みを使う場合は、サーバーを起動する前に `BASKET_RFDETR_WEIGHTS` をファイルの絶対パスに設定します。
-独自のクラス番号は解析APIの `ball_class_id` で指定します。初期UIはCOCOモデル向けです。
+The local API specification is available at [http://127.0.0.1:8000/api/docs](http://127.0.0.1:8000/api/docs) while the server is running.
 
-## 動作確認
+To use fine-tuned **RF-DETR Nano** weights, set `BASKET_RFDETR_WEIGHTS` to the absolute checkpoint path before starting the server. For a model with a custom label map, pass its ball class number as `ball_class_id` to the analysis API. The initial UI configuration assumes the COCO label map.
+
+## Verification
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 node --check basket/static/app.js
+node --test tests/trajectory.test.cjs
 .\.venv\Scripts\python.exe -m basket.cli demo
 ```
 
-テストは、追跡の短い欠落・長い欠落・誤候補、ドリブル、反復シュート、遮蔽、2D通過の判定保留、
-2D角度、成功率の分母、修正の永続化・履歴・除外復帰・CSV、可変フレームレートを対象とします。
-デモは26.4秒・6本の**合成**映像です。表示する成功4・失敗1・判定不能1は合成データの設定値で、AIの実動画精度を示しません。
+The tests cover short and long tracking gaps, false candidates, dribbling, repeated shots, occlusion, inconclusive 2D crossings, 2D angles, the make-percentage denominator, correction persistence and history, exclusion restoration, CSV export, and variable-frame-rate video.
 
-## 次の検証に必要なもの
+`python -m basket.cli demo` now registers the local `data/demo/single_three_point.mov` clip; it does not generate synthetic footage or run analysis. Forecast tests additionally verify that future frames do not affect an earlier prediction, gaps reset the observation window, and excluded shots have no forecasts.
 
-- 撮影位置の異なる実際のフリースロー動画（1本10〜20投）。実動画はまだ提供されていません。
-- 1人、同じ位置、横向き・三脚固定で、全身・ボールの頂点・リングが映ること。
-- 手元・頂点・リング付近のボール検出率、リリース誤差、試投の適合率・再現率、成否一致率・判定不能率の評価。
-- 別撮影日の動画を評価用に確保し、調整用・学習用の動画から分離。
+## Further validation required
 
-一般的な `sports ball` モデルでは小さなボール、ブレ、遮蔽を検出できない場合があります。
-未検出の試投を手動追加する機能・学習用ラベリング・追加学習・評価レポートは次の工程です。
-イベントルールの現在の区間長はリリース後3秒、初期の閾値は画面サイズ基準です。実動画で調整が必要です。
-人物の領域内に複数人が入る映像、カメラ移動、回転メタデータ付き動画は初期対象外です。
-回転メタデータ付き動画は横向きに書き出して読み込んでください。
-実速度(km/h)、実高さ(m)、3D角度、フォーム採点は未実装です。
-再解析は同じセッションの結果を更新し、直前の計測・修正データを `history/` に退避します。
-画面で実験を比較する場合は同じ動画を別セッションとして読み込んでください。
+- Expand beyond the supplied single-shot real clip: collect free-throw videos from multiple camera positions, with 10–20 shots per video.
+- Use a single player in a consistent location, filmed side-on with a fixed tripod; keep the whole body, trajectory apex, and rim visible.
+- Measure ball recall near the hands, trajectory apex, and rim; release-time error; attempt precision and recall; outcome agreement; and the unknown-result rate.
+- Reserve videos from a separate recording day for evaluation, apart from tuning and training footage.
 
-## 参照
+A general-purpose `sports ball` model can miss a small, blurred, or occluded basketball. Manual attempt creation, training-data labeling, fine-tuning, and evaluation reports are future work. The current event window ends three seconds after release, and the initial thresholds are relative to the image dimensions; both require calibration on real footage.
 
-- [MediaPipe Pose Landmarker — Python公式ガイド](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker/python)
-- [RF-DETR — 物体検出の公式ガイド](https://rfdetr.roboflow.com/latest/learn/run/detection/)
-- [RF-DETR — 公式APIリファレンス](https://rfdetr.roboflow.com/latest/reference/rfdetr/)
+Videos containing multiple people inside the configured player region, camera movement, or rotation metadata are outside the initial scope. Export videos with rotation metadata in landscape orientation before importing them.
 
-添付投稿は見た目・構成の参考資料として扱い、投稿内の記述を実装上の追加指示として扱っていません。
+Real-world speed in km/h, physical height in meters, 3D joint angles, and form scoring are not implemented. Re-analysis updates the same session and archives its previous measurements and corrections under `history/`. To compare experiments in the UI, import the same video as a separate session.
+
+## References
+
+- [MediaPipe Pose Landmarker: Python guide](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker/python)
+- [RF-DETR object detection guide](https://rfdetr.roboflow.com/latest/learn/run/detection/)
+- [RF-DETR API reference](https://rfdetr.roboflow.com/latest/reference/rfdetr/)
+
+Any attached social-media posts were used only as visual and structural references; their text was not treated as implementation requirements.

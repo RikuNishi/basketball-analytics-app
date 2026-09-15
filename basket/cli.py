@@ -19,13 +19,13 @@ def main():
         print(f"Pose model: {path}")
         print("RF-DETR weights are downloaded by RF-DETR on first analysis.")
     elif args.command == "demo":
-        from .demo import create_demo
-        session = create_demo(ROOT/"demo")
-        print(f"Synthetic demo ready: {session['summary']}")
+        from .default_session import prepare_default
+        session = prepare_default(ROOT)
+        print(f"Local clip: {session['name']}" if session else "Place single_three_point.mov in data/demo first.")
     else:
         import uvicorn
-        from .demo import create_demo
-        create_demo(ROOT/"demo")
+        from .default_session import prepare_default
+        prepare_default(ROOT)
         uvicorn.run("basket.server:app", host="127.0.0.1", port=args.port)
 
 
