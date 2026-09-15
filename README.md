@@ -11,9 +11,9 @@ Basket Lab analyzes fixed-camera footage of a single basketball player locally i
 | Model / library | Purpose | Input and output | Application configuration |
 |---|---|---|---|
 | **RF-DETR Nano** (`rfdetr==1.10.1`) | Per-frame ball detection | RGB image -> bounding boxes, classes, and confidence scores. Each box is converted to a center point and approximate radius | COCO-pretrained `rf-detr-nano.pth`, filtered to the `sports ball` class. No basketball-specific fine-tuning has been performed |
-| **MediaPipe Pose Landmarker Lite** (`mediapipe==0.10.35`) | Body pose estimation | Image cropped to the manually selected player region -> 33 body landmarks, mapped back to full-frame pixel coordinates | `pose_landmarker_lite.task`, `VIDEO` mode, `num_poses=1`. Landmark confidence is the minimum of visibility and presence |
+| **MediaPipe Pose Landmarker Lite** (`mediapipe==0.10.35`) | Body pose estimation | Image cropped to the automatically detected or manually selected player region -> 33 body landmarks, mapped back to full-frame pixel coordinates | `pose_landmarker_lite.task`, `num_poses=1`; `IMAGE` mode for moving automatic crops and `VIDEO` mode for fixed manual crops. Landmark confidence is the minimum of visibility and presence |
 
-RF-DETR locates the **ball**, while MediaPipe estimates **body landmarks**. Python rules operating on their time series determine shot attempts, release times, and proposed outcomes. The application does not use a trained outcome classifier, a form-scoring model, or an LLM. Player and rim regions are selected manually; automatic rim and net detection are not implemented.
+RF-DETR locates the **ball**, while MediaPipe estimates **body landmarks**. Python rules operating on their time series determine shot attempts, release times, and proposed outcomes. The application does not use a trained outcome classifier, a form-scoring model, or an LLM. The rim is selected manually. Player localization defaults to automatic detection for a single moving player; a manually selected fixed crop remains available. Automatic rim and net detection are not implemented.
 
 Implementation: [detectors.py](basket/detectors.py). See [models/README.md](models/README.md) for model storage and custom-weight configuration.
 
@@ -103,7 +103,7 @@ RF-DETR downloads its official pretrained weights on the first real analysis. Mo
 ## Usage
 
 1. **Import a practice video:** MP4, MOV, M4V, AVI, MKV, or WebM; up to 2 GB, 20 minutes, and 4K.
-2. **Configure the recording:** Drag on the image to mark the outside of the rim and the player region. Include the player's entire body and shooting-hand motion, select handedness, and start the analysis.
+2. **Configure the recording:** Mark the rim, enable automatic player detection for one moving player, select handedness, and start analysis. An optional manual player region is available; include the entire body and shooting-hand motion when using it.
 3. **Review:** Select a shot to seek to just before release. Use slow playback, frame stepping, and the pose, trajectory, and rim display toggles.
 4. **Correct:** Edit the outcome, release time, and notes. False detections can be excluded and later restored. An edit history is retained.
 5. **Export:** Download shot data as CSV, raw per-frame measurements as JSON, or an annotated MP4. After corrections, the video is rendered again before download.
@@ -115,7 +115,7 @@ Videos are stored and analyzed on this computer. The application does not implem
 | Area | Current implementation |
 |---|---|
 | Video decoding | PyAV preserves the original presentation timestamps, time base, and relative time; an FPS-derived fallback is explicitly marked when timestamps are missing |
-| Pose | MediaPipe Pose Landmarker in VIDEO mode, limited to one person in the configured fixed player region |
+| Pose | MediaPipe Pose Landmarker (IMAGE mode for moving crops; VIDEO for fixed crops), one person in a moving automatic crop or an optional fixed manual crop |
 | Ball detection | RF-DETR Nano pretrained on COCO; RGB input and class-name resolution for `sports ball` |
 | Tracking | Velocity prediction and distance gating; measured and predicted positions remain distinguishable; tracking resets after a gap longer than 0.12 seconds by default |
 | Attempt and release detection | Multi-frame ball possession near the wrist followed by upward motion and separation toward the rim; the release candidate interval is retained |
@@ -197,3 +197,11 @@ Real-world speed in km/h, physical height in meters, 3D joint angles, and form s
 - [RF-DETR API reference](https://rfdetr.roboflow.com/latest/reference/rfdetr/)
 
 Any attached social-media posts were used only as visual and structural references; their text was not treated as implementation requirements.
+
+## Current development scope
+
+[Issue #1](https://github.com/RikuNishi/basketball-analytics-app/issues/1) tracks moving single-player analysis for 30-minute recorded practice. Real-time processing, multiple players, moving cameras, and automatic rim detection are out of scope. See [the scoped work plan](docs/single-player-recorded-analysis.md).
+
+Automatic localization uses the person boxes returned by the existing RF-DETR pass. It pauses pose measurements when no unique person is detected and reacquires after absence. Moving crops use MediaPipe IMAGE mode to avoid carrying temporal pose state between different crop coordinate systems. This costs additional pose inference work and needs longer real-video validation. The 30-minute storage, resume, and windowed-review work is still pending; the existing 20-minute upload limit remains in place.
+
+Automatic player localization currently requires the bundled COCO model. When using `BASKET_RFDETR_WEIGHTS` or a custom `ball_class_id`, select a manual player region; a custom model may not expose the expected person class.
